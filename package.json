@@ -1,0 +1,30 @@
+{
+  "name": "chainlink-us-govt-data",
+  "version": "1.0.0",
+  "description": "Collects US Government macroeconomic data from Chainlink Data Feeds (BEA GDP, PCE, Real Final Sales)",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "start:once": "tsx src/index.ts --once",
+    "start:daemon": "tsx src/index.ts --daemon",
+    "inspect": "tsx scripts/inspect.ts",
+    "backfill": "tsx scripts/backfill.ts",
+    "build": "tsc",
+    "lint": "eslint src scripts --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\" \"scripts/**/*.ts\""
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.0",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/node-cron": "^3.0.11",
+    "@typescript-eslint/eslint-plugin": "^7.14.1",
+    "@typescript-eslint/parser": "^7.14.1",
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.2",
+    "tsx": "^4.15.7",
+    "typescript": "^5.5.2"
+  }
+}
