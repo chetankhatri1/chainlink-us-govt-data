@@ -1,4 +1,4 @@
-import { Cadence, FeedId, FeedMeta, NetworkId } from '../types';
+import { Cadence, FeedId, FeedMeta } from '../types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AggregatorV3Interface ABI (minimal — only what we need)
@@ -48,25 +48,9 @@ export const AGGREGATOR_V3_ABI = [
 ] as const;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Feed Metadata & Contract Addresses
-//
-// ⚠️  IMPORTANT — CONTRACT ADDRESSES
-// The Chainlink US Government Macroeconomic feed addresses are published at:
-//   https://docs.chain.link/data-feeds/us-government-macroeconomic/addresses
-//
-// The placeholder string 'FETCH_FROM_DOCS' must be replaced with the real
-// checksummed address before those networks can be used.
-//
-// To populate: visit the docs URL above, find the address for each feed on
-// each network, and replace the placeholder strings below.
+// Feed Metadata & Contract Addresses — Base Mainnet
+// Source: https://docs.chain.link/data-feeds/us-government-macroeconomic/addresses
 // ─────────────────────────────────────────────────────────────────────────────
-
-const PLACEHOLDER = 'FETCH_FROM_DOCS';
-
-/** Sentinal value — a real address starts with '0x' and is 42 chars. */
-export function isPlaceholder(address: string): boolean {
-  return address === PLACEHOLDER;
-}
 
 export const FEEDS: Record<FeedId, FeedMeta> = {
   // ── Real Gross Domestic Product ─────────────────────────────────────────
@@ -75,18 +59,7 @@ export const FEEDS: Record<FeedId, FeedMeta> = {
     name: 'Real GDP / Level',
     description: 'Real Gross Domestic Product — absolute level (billions of chained 2017 USD)',
     cadence: 'quarterly' as Cadence,
-    addresses: {
-      ETHEREUM: PLACEHOLDER,
-      BASE: PLACEHOLDER,
-      ARBITRUM: PLACEHOLDER,
-      OPTIMISM: PLACEHOLDER,
-      AVALANCHE: PLACEHOLDER,
-      ZKSYNC: PLACEHOLDER,
-      LINEA: PLACEHOLDER,
-      MANTLE: PLACEHOLDER,
-      SONIC: PLACEHOLDER,
-      BOTANIX: PLACEHOLDER,
-    } as Partial<Record<NetworkId, string>>,
+    addresses: { BASE: '0x0df397aFE00085C138a99eFB39C498e08eB95aD1' },
   },
 
   GDP_PCT_CHANGE: {
@@ -94,18 +67,7 @@ export const FEEDS: Record<FeedId, FeedMeta> = {
     name: 'Real GDP / % Change',
     description: 'Real GDP — annualised quarter-over-quarter percentage change',
     cadence: 'quarterly' as Cadence,
-    addresses: {
-      ETHEREUM: PLACEHOLDER,
-      BASE: PLACEHOLDER,
-      ARBITRUM: PLACEHOLDER,
-      OPTIMISM: PLACEHOLDER,
-      AVALANCHE: PLACEHOLDER,
-      ZKSYNC: PLACEHOLDER,
-      LINEA: PLACEHOLDER,
-      MANTLE: PLACEHOLDER,
-      SONIC: PLACEHOLDER,
-      BOTANIX: PLACEHOLDER,
-    } as Partial<Record<NetworkId, string>>,
+    addresses: { BASE: '0xe0eda54fC1362C0d7d0ff855E4fCEA79916Fe094' },
   },
 
   // ── Personal Consumption Expenditures Price Index ────────────────────────
@@ -114,37 +76,15 @@ export const FEEDS: Record<FeedId, FeedMeta> = {
     name: 'PCE Price Index / Level',
     description: 'Personal Consumption Expenditures Price Index — absolute level',
     cadence: 'monthly' as Cadence,
-    addresses: {
-      ETHEREUM: PLACEHOLDER,
-      BASE: PLACEHOLDER,
-      ARBITRUM: PLACEHOLDER,
-      OPTIMISM: PLACEHOLDER,
-      AVALANCHE: PLACEHOLDER,
-      ZKSYNC: PLACEHOLDER,
-      LINEA: PLACEHOLDER,
-      MANTLE: PLACEHOLDER,
-      SONIC: PLACEHOLDER,
-      BOTANIX: PLACEHOLDER,
-    } as Partial<Record<NetworkId, string>>,
+    addresses: { BASE: '0x18A3fcA54FaC5B05837205bA4b823fc56191F793' },
   },
 
   PCE_PCT_CHANGE: {
     id: 'PCE_PCT_CHANGE',
     name: 'PCE Price Index / % Change',
-    description: 'PCE Price Index — annualised month-over-month percentage change (inflation proxy)',
+    description: 'PCE Price Index — annualised percentage change (inflation proxy)',
     cadence: 'monthly' as Cadence,
-    addresses: {
-      ETHEREUM: PLACEHOLDER,
-      BASE: PLACEHOLDER,
-      ARBITRUM: PLACEHOLDER,
-      OPTIMISM: PLACEHOLDER,
-      AVALANCHE: PLACEHOLDER,
-      ZKSYNC: PLACEHOLDER,
-      LINEA: PLACEHOLDER,
-      MANTLE: PLACEHOLDER,
-      SONIC: PLACEHOLDER,
-      BOTANIX: PLACEHOLDER,
-    } as Partial<Record<NetworkId, string>>,
+    addresses: { BASE: '0x2a18E2d46Cb067b69e0759dB39b16597fC42D962' },
   },
 
   // ── Real Final Sales to Private Domestic Purchasers ─────────────────────
@@ -154,18 +94,7 @@ export const FEEDS: Record<FeedId, FeedMeta> = {
     description:
       'Real Final Sales to Private Domestic Purchasers — absolute level (demand excl. inventories)',
     cadence: 'quarterly' as Cadence,
-    addresses: {
-      ETHEREUM: PLACEHOLDER,
-      BASE: PLACEHOLDER,
-      ARBITRUM: PLACEHOLDER,
-      OPTIMISM: PLACEHOLDER,
-      AVALANCHE: PLACEHOLDER,
-      ZKSYNC: PLACEHOLDER,
-      LINEA: PLACEHOLDER,
-      MANTLE: PLACEHOLDER,
-      SONIC: PLACEHOLDER,
-      BOTANIX: PLACEHOLDER,
-    } as Partial<Record<NetworkId, string>>,
+    addresses: { BASE: '0x65623109aA4561AD3cfF503542083548CeD7e085' },
   },
 
   REAL_FINAL_SALES_PCT_CHANGE: {
@@ -173,36 +102,22 @@ export const FEEDS: Record<FeedId, FeedMeta> = {
     name: 'Real Final Sales to Private Domestic / % Change',
     description: 'Real Final Sales to Private Domestic Purchasers — annualised % change',
     cadence: 'quarterly' as Cadence,
-    addresses: {
-      ETHEREUM: PLACEHOLDER,
-      BASE: PLACEHOLDER,
-      ARBITRUM: PLACEHOLDER,
-      OPTIMISM: PLACEHOLDER,
-      AVALANCHE: PLACEHOLDER,
-      ZKSYNC: PLACEHOLDER,
-      LINEA: PLACEHOLDER,
-      MANTLE: PLACEHOLDER,
-      SONIC: PLACEHOLDER,
-      BOTANIX: PLACEHOLDER,
-    } as Partial<Record<NetworkId, string>>,
+    addresses: { BASE: '0xe2b3688371130f333443428Cf03f27Ce0378F9dC' },
   },
 };
 
 /**
- * Returns a flat list of (feed, network, address) tuples for every combination
- * where a real address has been configured (i.e. not a placeholder).
+ * Returns a flat list of (feed, network, address) tuples for every feed entry.
  */
 export function getDeployedFeeds(): Array<{
   feed: FeedMeta;
-  networkId: NetworkId;
+  networkId: string;
   address: string;
 }> {
-  const result: Array<{ feed: FeedMeta; networkId: NetworkId; address: string }> = [];
+  const result: Array<{ feed: FeedMeta; networkId: string; address: string }> = [];
   for (const feed of Object.values(FEEDS)) {
     for (const [networkId, address] of Object.entries(feed.addresses)) {
-      if (address && !isPlaceholder(address)) {
-        result.push({ feed, networkId: networkId as NetworkId, address });
-      }
+      if (address) result.push({ feed, networkId, address });
     }
   }
   return result;
