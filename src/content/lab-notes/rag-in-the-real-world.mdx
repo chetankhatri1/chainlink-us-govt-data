@@ -1,0 +1,132 @@
+---
+title: "RAG in the real world: evals, drift, and data contracts"
+date: "2025-01-15"
+excerpt: "Most RAG systems that fail in production don't fail because of bad retrieval algorithms. They fail because nobody defined what 'good' meant before they shipped."
+tags: ["RAG", "Evals", "Data quality", "LLM"]
+author: "Atlas Labs"
+---
+
+Most RAG systems that fail in production don't fail because of bad retrieval algorithms. They fail because nobody defined what "good" meant before they shipped.
+
+This post is about what it takes to run a retrieval-augmented generation system reliably over months — not just demo it successfully over a weekend.
+
+## The demo-to-production gap
+
+A RAG proof-of-concept is not hard to build. You chunk a document corpus, embed the chunks, store them in a vector database, retrieve the top-k results at query time, and pass them to an LLM. The demo works. Stakeholders are impressed.
+
+Then you ship it. Three months later, the quality has quietly degraded. The documents you indexed are now out of date. A new batch of PDFs was loaded without re-chunking. The embedding model was updated but the existing index wasn't regenerated. Somebody asked a question in a new domain and the retriever dutifully returned the least-wrong documents — which turned out to be quite wrong.
+
+The system had no mechanism to detect any of this.
+
+## Evals: define success before writing code
+
+The single most important discipline in production RAG is establishing an evaluation harness before writing retrieval code.
+
+An eval harness for RAG typically consists of:
+
+- **A golden dataset**: question/context/expected-answer triplets assembled from real or representative queries. Even 50–100 examples is useful.
+- **Retrieval metrics**: are the relevant chunks being retrieved? Measure recall@k and precision@k against labelled ground truth.
+- **Answer quality metrics**: is the generated answer faithful to the retrieved context? Is it correct? Use automated judges (another LLM evaluating against ground truth) combined with periodic human review.
+- **Latency and cost per query**: not just accuracy; production systems have budgets.
+
+```python
+# Minimal eval structure
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class EvalExample:
+    question: str
+    expected_answer: str
+    relevant_chunk_ids: list[str]  # ground truth for retrieval scoring
+    metadata: dict = None
+
+def evaluate_retrieval(examples: list[EvalExample], retriever, k: int = 5):
+    recall_scores = []
+    for ex in examples:
+        retrieved_ids = [chunk.id for chunk in retriever.retrieve(ex.question, k=k)]
+        recall = len(set(ex.relevant_chunk_ids) & set(retrieved_ids)) / len(ex.relevant_chunk_ids)
+        recall_scores.append(recall)
+    return {"recall@k": sum(recall_scores) / len(recall_scores), "k": k}
+```
+
+Run this eval on every pull request that changes the retrieval pipeline. It takes minutes and catches regressions before they reach users.
+
+## Data contracts for document ingestion
+
+A RAG system is only as good as its index. Document ingestion pipelines deserve the same quality gates as any other data pipeline.
+
+Define a data contract for your document corpus:
+
+- **Freshness**: how old can a document be before it should be flagged for re-indexing?
+- **Coverage**: which source systems feed the index? Are all expected sources represented?
+- **Schema**: what metadata is required on each document (source, date, category, access tier)?
+- **Completeness**: is the full document present, or just a summary?
+
+Implement assertions that run after each ingestion batch:
+
+```python
+def assert_corpus_health(corpus_stats: dict):
+    assert corpus_stats["documents_older_than_90d_pct"] < 0.05, \
+        f"Stale documents exceed threshold: {corpus_stats}"
+    assert corpus_stats["missing_metadata_pct"] < 0.01, \
+        "Too many documents missing required metadata"
+    assert corpus_stats["source_coverage"] == corpus_stats["expected_sources"], \
+        "Not all expected sources are represented in index"
+```
+
+Treat a failing ingestion assertion as a pipeline failure, not a warning.
+
+## Drift: the silent degradation
+
+RAG systems drift in two dimensions:
+
+**Data drift**: the document corpus changes. New terminology, new entities, new document types. The embedding model that worked well for the original corpus may perform differently on new content.
+
+**Query drift**: the questions users ask evolve. What started as a regulatory Q&A tool gets used for contract analysis. The retriever wasn't optimised for this distribution.
+
+The only way to detect drift reliably is to track metrics continuously over time. Set up a weekly eval run against your golden dataset. Plot retrieval recall and answer faithfulness over time. If either metric trends downward, investigate before users notice.
+
+For query drift, log every query and periodically cluster them to identify new patterns. If a new cluster emerges that doesn't map to your existing golden dataset, extend the eval set before the quality gap widens.
+
+## Chunking is a first-class engineering decision
+
+Most RAG tutorials use fixed-size character chunking. This is rarely optimal for production workloads.
+
+The right chunking strategy depends on your document structure:
+
+- **Structured documents** (SEC filings, contracts, regulatory text): chunk by logical section with header context prepended to each chunk
+- **Dense technical documents**: smaller overlapping chunks with more generous k at retrieval time
+- **Tabular content**: don't chunk tables — extract them separately and implement a table-aware retrieval path
+
+The wrong chunking strategy will produce irrelevant or partial retrievals that no reranking step can fully compensate for. Invest time here before optimising anything else.
+
+## Reranking: spend money where it matters
+
+Vector similarity retrieval is fast and cheap. It's also imprecise. A cross-encoder reranker — which jointly encodes the query and each candidate chunk — is much more accurate but slower and more expensive.
+
+The pattern that works well in production:
+
+1. Retrieve top-50 candidates with ANN search (fast, cheap)
+2. Rerank top-50 with a cross-encoder model (moderate cost)
+3. Pass top-5 reranked results to the LLM (the expensive step)
+
+This concentrates cost at the point where accuracy matters most, and the LLM never sees low-relevance content.
+
+## Observability checklist
+
+Before shipping a RAG system to production, verify you have:
+
+- [ ] Retrieval recall and precision tracked against golden dataset
+- [ ] Answer faithfulness score tracked over time
+- [ ] Per-query latency and token cost logged
+- [ ] Document freshness monitored with alerting
+- [ ] Query clustering to detect drift
+- [ ] Citation / source attribution available in the response
+- [ ] Human review queue for low-confidence responses
+
+None of these are expensive to implement. All of them are invisible until you need them — at which point they are invaluable.
+
+---
+
+Building RAG that works is less about algorithmic sophistication and more about engineering discipline: defining success, instrumenting the system, and treating data quality as load-bearing. The retrieval algorithm is rarely the bottleneck. The process around it usually is.

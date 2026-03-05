@@ -1,0 +1,249 @@
+---
+title: "Agent workflows that don't break: orchestration, guardrails, and observability"
+date: "2025-03-01"
+excerpt: "Agent demos are easy. Production agents are hard. Here's what separates a reliable multi-step agent system from one that fails silently on edge cases."
+tags: ["Agents", "Orchestration", "Observability", "LLM"]
+author: "Atlas Labs"
+---
+
+Agent demos are easy. You wire together a few tool calls, show it retrieving information and taking action, and the room is impressed. Production agents are hard. They fail on edge cases, accumulate cost silently, take unintended actions when inputs are ambiguous, and provide no insight into what went wrong when they do.
+
+This post is about the engineering practices that make multi-step agent systems reliable enough to run without someone watching them.
+
+## The reliability gap
+
+The fundamental problem with LLM-based agents is that they're probabilistic in a context where you need predictability. A deterministic pipeline either processes an input or it doesn't. An agent might process it correctly, process it incorrectly with high confidence, or get stuck in a loop. You often can't tell which happened without looking at the trace.
+
+This doesn't mean agents aren't useful — they clearly are. It means you have to be deliberate about where you deploy them, how you constrain them, and how you observe them.
+
+## Design for the 80% case
+
+The most reliable agent workflows are the ones that are narrow. Don't build an agent that handles everything. Build an agent that handles the 80% of cases that are well-defined, and routes the remaining 20% to humans.
+
+This reframing changes the design problem significantly. Instead of:
+
+> "How do I make the agent handle all possible inputs?"
+
+The question becomes:
+
+> "What inputs can I confidently automate, and what's the cleanest way to detect and route everything else?"
+
+Define your automation boundary explicitly. What document types does the agent handle? What field formats? What does an out-of-scope input look like? Make the routing logic explicit code, not LLM judgement:
+
+```python
+def route_request(request: IncomingRequest) -> Literal["agent", "human"]:
+    # Explicit, auditable routing logic
+    if request.document_type not in SUPPORTED_DOCUMENT_TYPES:
+        return "human"
+    if request.jurisdiction not in SUPPORTED_JURISDICTIONS:
+        return "human"
+    if request.value > AUTOMATION_VALUE_THRESHOLD:
+        return "human"  # High-value decisions go to humans
+    if request.has_conflicting_fields():
+        return "human"
+    return "agent"
+```
+
+Every case routed to humans should be logged with the routing reason. This data tells you where to invest next — either expanding automation coverage or improving data quality upstream.
+
+## Structured outputs reduce errors
+
+LLMs produce text. Text needs to be parsed into structured data to drive actions. This is a failure point.
+
+Use structured output features (JSON mode, tool calling with schemas) rather than parsing free-form text. Define precise Pydantic models for every agent action:
+
+```python
+from pydantic import BaseModel, Field
+from typing import Literal
+
+class ExtractedInvoiceFields(BaseModel):
+    invoice_number: str = Field(description="Invoice reference number")
+    invoice_date: str = Field(description="Date in ISO 8601 format: YYYY-MM-DD")
+    total_amount: float = Field(description="Total amount including tax")
+    currency: Literal["GBP", "USD", "EUR"] = Field(description="ISO 4217 currency code")
+    vendor_name: str = Field(description="Legal name of the vendor")
+    confidence: Literal["high", "medium", "low"] = Field(
+        description="Confidence in extraction quality. Set 'low' if any field is uncertain."
+    )
+
+class AgentAction(BaseModel):
+    action: Literal["approve", "reject", "escalate_to_human"]
+    reason: str = Field(description="Brief explanation of the decision")
+    fields_used: list[str] = Field(description="Which extracted fields drove this decision")
+```
+
+The `confidence` field is important. When the LLM indicates low confidence in its own extraction, route to human review automatically. It's a crude but effective self-assessment mechanism.
+
+## Guardrails: explicit constraints on actions
+
+Guardrails are code-level checks that run before an agent takes an action. They are not LLM-evaluated — they are deterministic assertions:
+
+```python
+class AgentGuardrails:
+    def __init__(self, config: GuardrailConfig):
+        self.config = config
+
+    def check_before_action(self, action: AgentAction, context: ActionContext) -> GuardrailResult:
+        checks = [
+            self._check_action_in_scope(action),
+            self._check_value_threshold(action, context),
+            self._check_rate_limit(context.agent_id),
+            self._check_not_duplicate(action, context),
+        ]
+
+        failures = [c for c in checks if not c.passed]
+        if failures:
+            return GuardrailResult(
+                allowed=False,
+                blocking_checks=failures,
+                override_required=True
+            )
+        return GuardrailResult(allowed=True)
+
+    def _check_value_threshold(self, action: AgentAction, context: ActionContext) -> Check:
+        if action.action == "approve" and context.amount > self.config.auto_approve_limit:
+            return Check(
+                passed=False,
+                check="value_threshold",
+                message=f"Amount {context.amount} exceeds auto-approve limit {self.config.auto_approve_limit}"
+            )
+        return Check(passed=True, check="value_threshold")
+```
+
+Guardrails should be applied at every action boundary. They are your last line of defence before an agent does something irreversible. Log every guardrail trigger — patterns in guardrail failures indicate design problems in the agent itself.
+
+## Human-in-the-loop checkpoints
+
+Not every decision should be fully automated. Build human review queues into your agent workflows for:
+
+- Low-confidence outputs
+- High-value decisions
+- Novel input patterns the agent hasn't seen before
+- Any action that's difficult to reverse
+
+The review queue is not a fallback for when the agent fails — it's a designed component of the workflow:
+
+```python
+async def process_with_human_checkpoints(
+    request: IncomingRequest,
+    agent: Agent,
+    review_queue: ReviewQueue,
+) -> ProcessingResult:
+    # Step 1: Agent extraction
+    extracted = await agent.extract_fields(request)
+
+    # Checkpoint 1: Low confidence → human review
+    if extracted.confidence == "low":
+        ticket = await review_queue.create(
+            type="low_confidence_extraction",
+            data=extracted,
+            request_id=request.id,
+        )
+        return ProcessingResult(status="pending_review", ticket_id=ticket.id)
+
+    # Step 2: Agent decision
+    decision = await agent.make_decision(extracted)
+
+    # Checkpoint 2: High-value action → human approval
+    if decision.requires_human_approval():
+        ticket = await review_queue.create(
+            type="approval_required",
+            data=decision,
+            request_id=request.id,
+        )
+        return ProcessingResult(status="pending_approval", ticket_id=ticket.id)
+
+    # Step 3: Execute action with guardrails
+    result = await execute_with_guardrails(decision, request)
+    return ProcessingResult(status="complete", result=result)
+```
+
+Track the volume of cases hitting each checkpoint. If checkpoint volumes are high, the agent needs improvement. If they're near-zero, investigate whether the checkpoint criteria are too lenient.
+
+## Observability: tracing every step
+
+An agent without observability is a black box. You need to know:
+
+- What the agent received as input
+- What it decided at each step and why
+- Which tools it called and what they returned
+- How long each step took and what it cost
+- What the final output was
+
+Use an LLM observability platform (Langfuse, LangSmith, Helicone, or a custom solution) to capture a full trace for every execution:
+
+```python
+from langfuse import Langfuse
+
+langfuse = Langfuse()
+
+async def traced_agent_run(request: IncomingRequest) -> AgentResult:
+    trace = langfuse.trace(
+        name="invoice_processing",
+        input=request.dict(),
+        metadata={"request_id": request.id, "source": request.source},
+    )
+
+    try:
+        span = trace.span(name="extraction")
+        extracted = await extract_fields(request)
+        span.end(output=extracted.dict())
+
+        span = trace.span(name="decision")
+        decision = await make_decision(extracted)
+        span.end(output=decision.dict())
+
+        span = trace.span(name="execution")
+        result = await execute(decision)
+        span.end(output=result.dict())
+
+        trace.update(output=result.dict(), level="DEFAULT")
+        return result
+
+    except Exception as e:
+        trace.update(output={"error": str(e)}, level="ERROR")
+        raise
+```
+
+Set up alerts on:
+
+- Error rate by agent step
+- p95 latency per workflow
+- Cost per execution trending upward
+- Guardrail trigger rate
+
+## Cost management
+
+Agentic workflows can be expensive, especially when they loop or hit unexpected edge cases. Implement hard limits:
+
+```python
+class BudgetGuard:
+    def __init__(self, max_tokens_per_run: int, max_steps: int):
+        self.max_tokens = max_tokens_per_run
+        self.max_steps = max_steps
+
+    def check(self, tokens_used: int, steps_taken: int) -> None:
+        if tokens_used > self.max_tokens:
+            raise BudgetExceeded(f"Token budget exceeded: {tokens_used} > {self.max_tokens}")
+        if steps_taken > self.max_steps:
+            raise BudgetExceeded(f"Step limit exceeded: {steps_taken} > {self.max_steps}")
+```
+
+Track token spend and latency per workflow step in your observability data. Expensive steps are candidates for caching, simplification, or replacement with a cheaper model.
+
+## Idempotency and failure recovery
+
+Agent workflows fail. Network errors, rate limits, and LLM timeouts are facts of production life. Design for it:
+
+- Every workflow step should be idempotent where possible — re-running a step on the same input should produce the same result
+- Persist state at each checkpoint so a resumed workflow doesn't repeat completed steps
+- Implement exponential backoff with jitter for transient failures
+- Define explicit terminal states: `complete`, `failed`, `escalated`, `abandoned`
+
+An agent workflow with no terminal failure state will loop indefinitely, burning tokens and time.
+
+---
+
+Production-grade agent systems require the same engineering rigour as any distributed system: explicit error handling, observable internals, constrained action spaces, and tested failure modes. The LLM is one component in a system — the rest of the engineering around it determines whether it's reliable.
+
+Build the infrastructure first. Add the intelligence second. You'll thank yourself when something unexpected happens at 3am.

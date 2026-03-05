@@ -1,0 +1,190 @@
+---
+title: "Entity resolution for financial instruments: deterministic + probabilistic + LLM assist"
+date: "2025-02-10"
+excerpt: "Financial instrument master data is a deduplication problem with high stakes. Here's a layered approach that combines rule-based matching, probabilistic scoring, and LLM disambiguation."
+tags: ["MDM", "Entity resolution", "Financial data", "LLM"]
+author: "Atlas Labs"
+---
+
+Financial instrument master data is a deduplication problem with high stakes. A bond referenced by two slightly different names in two source systems is either the same bond or two different bonds — and the downstream implications (risk aggregation, regulatory reporting, P&L attribution) are very different depending on which it is.
+
+This post describes the layered matching approach we use for financial instrument entity resolution, combining deterministic rules, probabilistic scoring, and LLM-assisted disambiguation for hard cases.
+
+## Why instrument master data is hard
+
+Financial instruments come from many sources: Bloomberg, Refinitiv, custodians, prime brokers, internal systems. Each has its own identifier conventions, naming patterns, and data quality standards.
+
+Some instruments have globally unique identifiers (ISIN, CUSIP, SEDOL) — but these are often missing, wrong, or inconsistently applied. A private credit facility won't have an ISIN. A legacy municipal bond may have an ISIN that's been reused. A derivative may be identified only by internal reference codes that differ between counterparties.
+
+The matching problem has three distinct zones of difficulty:
+
+1. **Easy**: instruments with matching ISINs, CUSIPs, or SEDOLs — deterministic match, no ambiguity
+2. **Medium**: instruments without global identifiers where name + issuer + instrument type + tenor narrow the candidates significantly
+3. **Hard**: instruments where two candidates are genuinely ambiguous — same issuer, similar name, overlapping tenor, different internal codes
+
+## Layer 1: Deterministic matching
+
+Start with what's unambiguous. Before any probabilistic logic runs, exhaust the exact-match rules:
+
+```python
+DETERMINISTIC_RULES = [
+    ("isin", "isin"),           # ISIN = ISIN → definite match
+    ("cusip", "cusip"),         # CUSIP = CUSIP → definite match
+    ("sedol", "sedol"),         # SEDOL = SEDOL → definite match
+    ("figi", "figi"),           # FIGI = FIGI → definite match
+    ("lei", "lei"),             # Same legal entity → strong signal (not instrument-level)
+    ("internal_ref", "internal_ref"),  # Same internal system reference → definite match
+]
+
+def apply_deterministic_rules(candidate_a: Instrument, candidate_b: Instrument) -> MatchResult | None:
+    for field_a, field_b in DETERMINISTIC_RULES:
+        val_a = getattr(candidate_a, field_a, None)
+        val_b = getattr(candidate_b, field_b, None)
+        if val_a and val_b and val_a == val_b:
+            return MatchResult(
+                match=True,
+                confidence=1.0,
+                rule=f"exact:{field_a}",
+                rationale=f"{field_a.upper()} match: {val_a}"
+            )
+    return None  # No deterministic match found — escalate to probabilistic
+```
+
+Deterministic matches should be logged with their matching rule for audit purposes. An ISIN match that produced a wrong result is a data quality problem — you want to be able to trace it.
+
+## Layer 2: Probabilistic scoring
+
+For instruments without globally unique identifiers, score across multiple features and produce a weighted confidence score.
+
+```python
+from rapidfuzz import fuzz
+from dataclasses import dataclass
+
+@dataclass
+class FeatureScore:
+    feature: str
+    score: float      # 0–1
+    weight: float
+    raw_a: str
+    raw_b: str
+
+def score_name(name_a: str, name_b: str) -> FeatureScore:
+    # Normalise: remove legal suffixes, whitespace, punctuation
+    norm_a = normalise_instrument_name(name_a)
+    norm_b = normalise_instrument_name(name_b)
+    score = fuzz.token_sort_ratio(norm_a, norm_b) / 100
+    return FeatureScore("name", score, weight=0.30, raw_a=name_a, raw_b=name_b)
+
+def score_issuer(issuer_a: str, issuer_b: str) -> FeatureScore:
+    score = fuzz.token_sort_ratio(issuer_a, issuer_b) / 100
+    return FeatureScore("issuer", score, weight=0.25, raw_a=issuer_a, raw_b=issuer_b)
+
+def score_instrument_type(type_a: str, type_b: str) -> FeatureScore:
+    # Normalise to canonical types: equity, bond, loan, derivative, etc.
+    norm_a = INSTRUMENT_TYPE_MAP.get(type_a.lower(), type_a.lower())
+    norm_b = INSTRUMENT_TYPE_MAP.get(type_b.lower(), type_b.lower())
+    score = 1.0 if norm_a == norm_b else 0.0
+    return FeatureScore("instrument_type", score, weight=0.25, raw_a=type_a, raw_b=type_b)
+
+def score_maturity(maturity_a: date | None, maturity_b: date | None) -> FeatureScore:
+    if not maturity_a or not maturity_b:
+        return FeatureScore("maturity", 0.5, weight=0.10, raw_a=str(maturity_a), raw_b=str(maturity_b))
+    diff_days = abs((maturity_a - maturity_b).days)
+    score = max(0.0, 1.0 - diff_days / 365)  # Linear decay over 1 year
+    return FeatureScore("maturity", score, weight=0.10, raw_a=str(maturity_a), raw_b=str(maturity_b))
+
+def compute_composite_score(features: list[FeatureScore]) -> float:
+    total_weight = sum(f.weight for f in features)
+    return sum(f.score * f.weight for f in features) / total_weight
+```
+
+Calibrate your match/no-match threshold on a labelled golden dataset. A threshold of 0.85 worked well for us on fixed-income instruments; equity instruments typically need a lower threshold because names are shorter and less discriminating.
+
+## Layer 3: LLM disambiguation for hard cases
+
+For candidate pairs where the probabilistic score falls in the ambiguous band (typically 0.65–0.85), escalate to LLM review.
+
+The LLM's job is not to hallucinate — it's to reason over the features you present to it and produce a structured judgement:
+
+```python
+def llm_disambiguate(
+    instrument_a: Instrument,
+    instrument_b: Instrument,
+    feature_scores: list[FeatureScore],
+    client,  # your LLM client
+) -> LLMMatchResult:
+    prompt = f"""You are reviewing two financial instrument records to determine whether they refer to the same instrument.
+
+Instrument A:
+{format_instrument(instrument_a)}
+
+Instrument B:
+{format_instrument(instrument_b)}
+
+Feature comparison:
+{format_feature_scores(feature_scores)}
+
+Instructions:
+- Answer MATCH if you are confident these are the same instrument
+- Answer NO_MATCH if you are confident they are different instruments
+- Answer UNCERTAIN if the evidence is genuinely ambiguous
+- Always provide a brief rationale citing the specific features that drove your decision
+
+Respond with JSON: {{"decision": "MATCH|NO_MATCH|UNCERTAIN", "rationale": "..."}}"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        temperature=0,
+    )
+
+    return LLMMatchResult.parse_raw(response.choices[0].message.content)
+```
+
+Key constraints for production LLM disambiguation:
+
+- **Temperature = 0**: you want deterministic, not creative
+- **UNCERTAIN is a valid output**: route these to human review rather than forcing a decision
+- **Log everything**: store the full prompt, response, and rationale for every LLM call
+- **Rate limit**: LLM disambiguation is expensive; only invoke it for the ambiguous band
+
+## Match rationale storage
+
+Every match decision — deterministic, probabilistic, or LLM — should be stored with its rationale:
+
+```sql
+CREATE TABLE instrument_matches (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    instrument_a_id VARCHAR NOT NULL,
+    instrument_b_id VARCHAR NOT NULL,
+    match_decision  VARCHAR NOT NULL CHECK (match_decision IN ('MATCH', 'NO_MATCH', 'UNCERTAIN')),
+    confidence      DECIMAL(4,3),
+    match_layer     VARCHAR NOT NULL CHECK (match_layer IN ('deterministic', 'probabilistic', 'llm', 'human')),
+    matching_rule   VARCHAR,           -- e.g. 'exact:isin' or 'probabilistic:0.87'
+    rationale       TEXT,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    reviewed_by     VARCHAR,           -- set when human reviews an UNCERTAIN case
+    reviewed_at     TIMESTAMPTZ
+);
+```
+
+This table is your audit trail. When a downstream system produces a wrong result because two instruments were incorrectly merged or kept separate, you can trace exactly how the decision was made.
+
+## Continuous reconciliation
+
+Entity resolution is not a one-time batch job. New instruments arrive daily. Existing instruments are amended (name changes, maturity extensions, restructurings).
+
+Set up a reconciliation job that:
+
+1. Processes new and amended instruments through the matching pipeline
+2. Flags changes to previously matched pairs for human review
+3. Tracks match rate over time — a sudden drop indicates a data quality issue upstream
+
+Track your match rate against a monthly golden test dataset so you catch model or data drift before it affects downstream consumers.
+
+---
+
+The layered approach — deterministic → probabilistic → LLM → human — lets you apply expensive reasoning only where it's needed. Deterministic rules handle the majority of cases instantly. Probabilistic scoring narrows the uncertain band. LLMs handle genuine ambiguity. Humans handle the genuinely hard cases that machines shouldn't decide alone.
+
+The most important thing is the audit trail. In regulated industries, the how of a match decision matters as much as the what.
